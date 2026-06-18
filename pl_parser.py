@@ -25,11 +25,10 @@ NO_KEYWORDS = ["no.", "no", "序号"]
 # 已知的其它字段表头关键字，用来判断"右边紧邻列"是否其实是别的已知字段
 # （也就是说这次文件没有"建议品名/建议HS"这一列）
 KNOWN_OTHER_FIELD_KEYWORDS = [
-    "qty", "ctns", "g.w.", "n.w.", "税率", "建议品名", "建议hs", "建议海关编码",
-    "hts", "hs code",
+    "qty", "ctns", "g.w.", "n.w.", "税率", "hts", "hs code",
 ]
 
-SKU_PATTERN = re.compile(r"^[A-Z0-9]{8,}$")
+SKU_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9\-]{6,}$")
 
 
 def _find_header_row(ws, max_scan_rows=40):
