@@ -195,6 +195,51 @@ def _reset_batch_state():
         st.session_state.pop(key, None)
 
 
+def _build_batch_conflict_report(batch_conflicts: pd.DataFrame) -> bytes:
+    """生成批次内部冲突Excel报告：同一SKU的所有变体行用浅蓝底色，不同SKU之间用粗黑分隔线"""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "批次内部冲突"
+
+    headers = ["序号", "冲突SKU", "版本", "品名", "HS编码", "出现次数(文件数)", "来源文件"]
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
+        cell = ws.cell(1, c)
+        cell.font = Font(bold=True)
+
+    light_blue = PatternFill("solid", start_color="DCEBFA", end_color="DCEBFA")
+    thick_top = Border(top=Side(style="thick", color="333333"))
+
+    row_idx = 2
+    for n, (_, row) in enumerate(batch_conflicts.iterrows()):
+        sku = row["sku"]
+        variants = row["variants"]
+        first_row_of_sku = row_idx
+        for v_i, v in enumerate(variants):
+            ws.append([
+                n + 1, sku, v_i + 1, v["description"], v["hs_code"],
+                len(v["files"]), ", ".join(v["files"]),
+            ])
+            for c in range(1, len(headers) + 1):
+                ws.cell(row_idx, c).fill = light_blue
+            row_idx += 1
+        # 在该SKU第一行的上边框加粗分隔线，区分不同SKU
+        for c in range(1, len(headers) + 1):
+            ws.cell(first_row_of_sku, c).border = thick_top
+
+    widths = [6, 26, 6, 32, 14, 16, 60]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def page_upload_compare():
     render_page_header("上传与比对")
     upload_mode = st.radio("上传方式", ["ZIP批量上传", "单个/多个Excel文件"], horizontal=True)
@@ -260,10 +305,17 @@ def page_upload_compare():
             "（默认已预选「出现文件数最多」的版本，可在下拉框里修改）。处理完才能继续后续比对。"
         )
 
+        report_buf = _build_batch_conflict_report(batch_conflicts)
+        st.download_button(
+            "📥 一键下载批次内部冲突报告 (Excel)",
+            data=report_buf,
+            file_name=f"RongHui_BatchConflicts_{date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
         choice_rows = []
         for _, row in batch_conflicts.iterrows():
             variants = row["variants"]
-            # 默认预选出现次数最多的变体
             default_idx = max(range(len(variants)), key=lambda i: len(variants[i]["files"]))
             options = [
                 f"[{i+1}] {v['description']} | HS={v['hs_code']} | 来自{len(v['files'])}个文件: {', '.join(v['files'])}"
@@ -276,13 +328,15 @@ def page_upload_compare():
                 "_sku": row["sku"],
             })
 
-        for i, item in enumerate(choice_rows):
-            choice_rows[i]["选择采用哪个版本"] = st.selectbox(
-                f"SKU: {item['SKU']}",
-                options=item["_options"],
-                index=item["_options"].index(item["选择采用哪个版本"]),
-                key=f"batch_conflict_{item['_sku']}",
-            )
+        scroll_box = st.container(height=520, border=True)
+        with scroll_box:
+            for n, item in enumerate(choice_rows):
+                choice_rows[n]["选择采用哪个版本"] = st.selectbox(
+                    f"{n + 1}. SKU: {item['SKU']}",
+                    options=item["_options"],
+                    index=item["_options"].index(item["选择采用哪个版本"]),
+                    key=f"batch_conflict_{item['_sku']}",
+                )
 
         if st.button("✅ 确认批次内部冲突的选择，继续比对", type="primary"):
             resolutions = {}
