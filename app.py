@@ -116,11 +116,7 @@ def render_sidebar_footer():
     st.sidebar.markdown(
         """
         <hr style="border-color:#22324A; margin:1.5rem 0 0.8rem 0;">
-        <div style="color:#7C8CA0; font-size:0.78rem; line-height:1.5;">
-            RongHui_SKU_HS_Check<br>
-            Vevor EU — Internal Use Only
-        </div>
-        <div style="margin-top:0.9rem; color:#7C8CA0; font-size:0.78rem;">
+        <div style="color:#7C8CA0; font-size:0.78rem;">
             Designed and created by<br>
             <span style="color:#C7D2DD; font-weight:600;">Amélie — Vevor EU</span>
         </div>
@@ -132,6 +128,17 @@ def render_sidebar_footer():
 def render_footer():
     st.markdown(
         '<div class="app-footer">Designed and created by Amélie — Vevor EU</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_page_header():
+    st.markdown(
+        """
+        <div style="color:#5B6B7C; font-size:0.85rem; margin-top:-0.6rem; margin-bottom:1.2rem;">
+            RongHui_SKU_HS_Check &nbsp;·&nbsp; Vevor EU — Internal Use Only
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -175,6 +182,7 @@ def _reset_batch_state():
 
 def page_upload_compare():
     st.header("上传与比对")
+    render_page_header()
     upload_mode = st.radio("上传方式", ["ZIP批量上传", "单个/多个Excel文件"], horizontal=True)
 
     files_to_parse = []  # list of (filename, buffer)
@@ -385,6 +393,7 @@ def page_upload_compare():
 
 def page_database():
     st.header("主数据库")
+    render_page_header()
     db_df = sheets_db.load_master_db()
     st.caption(f"共 {len(db_df)} 条SKU记录")
 
@@ -408,6 +417,7 @@ def page_database():
 
 def page_change_log():
     st.header("变更日志")
+    render_page_header()
     log_df = sheets_db.load_change_log()
     st.caption(f"共 {len(log_df)} 条记录")
     action_filter = st.multiselect("筛选操作类型", options=sorted(log_df["action"].unique()) if len(log_df) else [])
