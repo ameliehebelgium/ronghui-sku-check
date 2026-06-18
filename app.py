@@ -114,17 +114,20 @@ def page_upload_compare():
 
     pending_new = st.session_state.get("pending_new", pd.DataFrame())
     if len(pending_new) > 0 and not st.session_state.get("new_skus_written", False):
-        new_rows = [
-            {
-                "sku": r["sku"], "description": r["new_description"],
-                "hs_code": r["new_hs_code"], "sources": r["sources"],
-            }
-            for _, r in pending_new.iterrows()
-        ]
-        sheets_db.append_new_skus(new_rows)
-        st.session_state["new_skus_written"] = True
-        st.session_state["today_new_skus"] = pending_new
-        st.success(f"已自动写入 {len(new_rows)} 个新SKU到数据库")
+        st.info(f"本次发现 {len(pending_new)} 个新SKU，确认无误后点击下方按钮写入数据库")
+        if st.button("✅ 确认写入新SKU到数据库", type="primary"):
+            new_rows = [
+                {
+                    "sku": r["sku"], "description": r["new_description"],
+                    "hs_code": r["new_hs_code"], "sources": r["sources"],
+                }
+                for _, r in pending_new.iterrows()
+            ]
+            sheets_db.append_new_skus(new_rows)
+            st.session_state["new_skus_written"] = True
+            st.session_state["today_new_skus"] = pending_new
+            st.success(f"已写入 {len(new_rows)} 个新SKU到数据库")
+            st.rerun()
 
     pending_conflicts = st.session_state.get("pending_conflicts", pd.DataFrame())
     if len(pending_conflicts) > 0:
