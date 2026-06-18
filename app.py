@@ -13,14 +13,131 @@ import streamlit as st
 from pl_parser import parse_packing_list
 from compare_engine import compare_batch, resolve_batch_conflicts, summarize
 import sheets_db
+from logo_const import VEVOR_LOGO_B64
 
 st.set_page_config(page_title="RongHui_SKU_HS_Check", layout="wide")
 
 APP_USERNAME = "Admin"
 APP_PASSWORD = "Admin123"
 
+CUSTOM_CSS = """
+<style>
+:root {
+    --navy-deep: #0B1220;
+    --navy-mid: #14233D;
+    --brand-blue: #1E3A5F;
+    --surface: #F7F8FA;
+    --border-soft: #D8DEE4;
+    --text-primary: #15202B;
+    --text-muted: #5B6B7C;
+}
+
+/* 侧边栏：深墨蓝，企业系统感 */
+section[data-testid="stSidebar"] {
+    background-color: var(--navy-deep);
+    border-right: 1px solid var(--navy-mid);
+}
+section[data-testid="stSidebar"] * {
+    color: #E7ECF2 !important;
+}
+section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] .stRadio label {
+    color: #C7D2DD !important;
+}
+
+/* 主内容区背景 */
+.main .block-container {
+    background-color: var(--surface);
+    padding-top: 2rem;
+}
+
+/* 标题样式 */
+h1, h2, h3 {
+    color: var(--brand-blue);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+/* 指标卡片化 */
+div[data-testid="stMetric"] {
+    background-color: white;
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    padding: 0.9rem 1rem;
+}
+div[data-testid="stMetric"] label {
+    color: var(--text-muted) !important;
+    font-weight: 600;
+}
+
+/* 信息/成功提示条，去掉默认圆润感，改为左侧色条风格 */
+div[data-testid="stAlert"] {
+    border-radius: 4px;
+    border-left: 4px solid var(--brand-blue);
+}
+
+/* 表格容器边框 */
+div[data-testid="stDataFrame"] {
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+}
+
+/* 页脚签名 */
+.app-footer {
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-soft);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+}
+</style>
+"""
+
+
+def inject_global_style():
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+def render_sidebar_header():
+    st.sidebar.markdown(
+        f"""
+        <div style="margin-bottom:1.2rem;">
+            <img src="data:image/png;base64,{VEVOR_LOGO_B64}"
+                 style="width:100%; border-radius:6px; display:block;" />
+        </div>
+        <hr style="border-color:#22324A; margin:0.8rem 0 1.2rem 0;">
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_footer():
+    st.sidebar.markdown(
+        """
+        <hr style="border-color:#22324A; margin:1.5rem 0 0.8rem 0;">
+        <div style="color:#7C8CA0; font-size:0.78rem; line-height:1.5;">
+            RongHui_SKU_HS_Check<br>
+            Vevor EU — Internal Use Only
+        </div>
+        <div style="margin-top:0.9rem; color:#7C8CA0; font-size:0.78rem;">
+            Designed and created by<br>
+            <span style="color:#C7D2DD; font-weight:600;">Amélie — Vevor EU</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_footer():
+    st.markdown(
+        '<div class="app-footer">Designed and created by Amélie — Vevor EU</div>',
+        unsafe_allow_html=True,
+    )
+
 
 def login_gate():
+    inject_global_style()
     if st.session_state.get("authenticated"):
         return True
     st.title("RongHui_SKU_HS_Check")
@@ -34,6 +151,7 @@ def login_gate():
             st.rerun()
         else:
             st.error("用户名或密码错误")
+    render_footer()
     return False
 
 
@@ -304,11 +422,12 @@ def main():
     if not login_gate():
         return
 
-    st.sidebar.title("RongHui_SKU_HS_Check")
+    render_sidebar_header()
     page = st.sidebar.radio("导航", ["上传与比对", "主数据库", "变更日志"])
     if st.sidebar.button("退出登录"):
         st.session_state["authenticated"] = False
         st.rerun()
+    render_sidebar_footer()
 
     if page == "上传与比对":
         page_upload_compare()
