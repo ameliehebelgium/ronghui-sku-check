@@ -177,12 +177,30 @@ def login_gate():
     return False
 
 
+def _fix_zip_filename_encoding(raw_name: str, flag_bits: int) -> str:
+    """
+    修复ZIP内中文文件名乱码：当ZIP条目未设置UTF-8标志位（flag_bits的0x800位）时，
+    Python的zipfile库会按CP437解码文件名，但很多压缩工具（尤其Mac系统自带的"压缩"
+    功能）实际写入的是UTF-8字节，导致中文文件名变成乱码。这里做一次"逆向"修复：
+    把已经被错误解码成CP437的字符串重新编码回原始字节，再按UTF-8正确解码。
+    """
+    if flag_bits & 0x800:
+        # 已经明确标记为UTF-8编码，说明zipfile已经解码正确，不需要处理
+        return raw_name
+    try:
+        return raw_name.encode("cp437").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        # 修复失败（比如本来就是英文文件名，或者并非UTF-8字节），保留原始值
+        return raw_name
+
+
 def extract_excels_from_zip(zip_file) -> list[tuple[str, io.BytesIO]]:
     out = []
     with zipfile.ZipFile(zip_file) as zf:
-        for name in zf.namelist():
+        for info in zf.infolist():
+            name = _fix_zip_filename_encoding(info.filename, info.flag_bits)
             if name.lower().endswith((".xlsx", ".xls")) and not name.startswith("__MACOSX"):
-                data = zf.read(name)
+                data = zf.read(info.filename)
                 out.append((name.split("/")[-1], io.BytesIO(data)))
     return out
 
@@ -344,6 +362,8 @@ def page_upload_compare():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+        st.caption("👉 每条记录请勾选左侧「已确认」复选框，表示你已经看过并确认这条的处理方式。")
+
         choice_rows = []
         for _, row in batch_conflicts.iterrows():
             variants = row["variants"]
@@ -363,17 +383,23 @@ def page_upload_compare():
         scroll_box = st.container(height=520, border=True)
         with scroll_box:
             for n, item in enumerate(choice_rows):
-                choice_rows[n]["选择采用哪个版本"] = st.selectbox(
-                    f"{n + 1}. SKU: {item['SKU']}",
-                    options=item["_options"],
-                    index=item["_options"].index(item["选择采用哪个版本"]),
-                    key=f"batch_conflict_{item['_sku']}",
-                )
+                col_check, col_select = st.columns([1, 9])
+                with col_check:
+                    st.markdown("<div style='margin-top:1.8rem;'></div>", unsafe_allow_html=True)
+                    checked = st.checkbox(
+                        "已确认", key=f"batch_conflict_checked_{item['_sku']}", label_visibility="collapsed"
+                    )
+                with col_select:
+                    choice_rows[n]["选择采用哪个版本"] = st.selectbox(
+                        f"{n + 1}. SKU: {item['SKU']}",
+                        options=item["_options"],
+                        index=item["_options"].index(item["选择采用哪个版本"]),
+                        key=f"batch_conflict_{item['_sku']}",
+                    )
+                choice_rows[n]["_checked"] = checked
 
-        # 统计有多少SKU仍停留在默认推荐值（即未被人工手动检查/更改过）
-        unchecked_count = sum(
-            1 for item in choice_rows if item["选择采用哪个版本"] == item["_default_label"]
-        )
+        # 统计有多少SKU还没被人工勾选「已确认」
+        unchecked_count = sum(1 for item in choice_rows if not item["_checked"])
 
         def _do_confirm():
             resolutions = {}
@@ -392,12 +418,12 @@ def page_upload_compare():
 
         if st.session_state.get("show_batch_confirm_warning", False):
             st.warning(
-                f"还有 {unchecked_count} 个SKU停留在系统默认推荐值，你尚未逐条检查确认。"
-                "是否仍要继续，直接采用这些默认值？"
+                f"还有 {unchecked_count} 个SKU你尚未勾选「已确认」，尚未逐条检查确认。"
+                "是否仍要继续，直接采用当前下拉框里的值（含未检查项的默认推荐值）？"
             )
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("仍然继续（采用默认值）", type="primary"):
+                if st.button("仍然继续（采用当前值）", type="primary"):
                     _do_confirm()
             with c2:
                 if st.button("我再检查一下"):
