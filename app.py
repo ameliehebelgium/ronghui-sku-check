@@ -195,6 +195,37 @@ def _reset_batch_state():
         st.session_state.pop(key, None)
 
 
+def _build_new_sku_summary_excel(export_df: pd.DataFrame) -> bytes:
+    """生成当天新SKU总结表，自动设置足够宽的列宽，避免内容被截断"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "新SKU总结表"
+
+    headers = list(export_df.columns)
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
+        ws.cell(1, c).font = Font(bold=True)
+
+    for _, row in export_df.iterrows():
+        ws.append([row[h] for h in headers])
+
+    # 按每列实际内容最大长度自动设置列宽（留一点余量，并设置上限避免单列过宽）
+    for col_idx, header in enumerate(headers, start=1):
+        max_len = len(str(header))
+        for value in export_df[header]:
+            max_len = max(max_len, len(str(value)))
+        width = min(max_len + 4, 80)
+        ws.column_dimensions[get_column_letter(col_idx)].width = max(width, 12)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _build_batch_conflict_report(batch_conflicts: pd.DataFrame) -> bytes:
     """生成批次内部冲突Excel报告：同一SKU的所有变体行用浅蓝底色，不同SKU之间用粗黑分隔线"""
     from openpyxl import Workbook
@@ -326,6 +357,7 @@ def page_upload_compare():
                 "选择采用哪个版本": options[default_idx],
                 "_options": options,
                 "_sku": row["sku"],
+                "_default_label": options[default_idx],
             })
 
         scroll_box = st.container(height=520, border=True)
@@ -338,7 +370,12 @@ def page_upload_compare():
                     key=f"batch_conflict_{item['_sku']}",
                 )
 
-        if st.button("✅ 确认批次内部冲突的选择，继续比对", type="primary"):
+        # 统计有多少SKU仍停留在默认推荐值（即未被人工手动检查/更改过）
+        unchecked_count = sum(
+            1 for item in choice_rows if item["选择采用哪个版本"] == item["_default_label"]
+        )
+
+        def _do_confirm():
             resolutions = {}
             for item in choice_rows:
                 chosen_label = item["选择采用哪个版本"]
@@ -350,7 +387,29 @@ def page_upload_compare():
             st.session_state["batch_conflicts_resolved"] = True
             st.session_state["pending_conflicts"] = resolved_df[resolved_df["status"] == "CONFLICT"].copy()
             st.session_state["pending_new"] = resolved_df[resolved_df["status"] == "NEW"].copy()
+            st.session_state.pop("show_batch_confirm_warning", None)
             st.rerun()
+
+        if st.session_state.get("show_batch_confirm_warning", False):
+            st.warning(
+                f"还有 {unchecked_count} 个SKU停留在系统默认推荐值，你尚未逐条检查确认。"
+                "是否仍要继续，直接采用这些默认值？"
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("仍然继续（采用默认值）", type="primary"):
+                    _do_confirm()
+            with c2:
+                if st.button("我再检查一下"):
+                    st.session_state.pop("show_batch_confirm_warning", None)
+                    st.rerun()
+        else:
+            if st.button("✅ 确认批次内部冲突的选择，继续比对", type="primary"):
+                if unchecked_count > 0:
+                    st.session_state["show_batch_confirm_warning"] = True
+                    st.rerun()
+                else:
+                    _do_confirm()
         return  # 批次内部冲突没处理完，不展示后续报告
 
     if len(batch_conflicts) == 0:
@@ -449,12 +508,13 @@ def page_upload_compare():
             columns={"new_description": "description", "new_hs_code": "hs_code"}
         )
         st.dataframe(export_df, use_container_width=True, hide_index=True)
-        buf = io.BytesIO()
-        export_df.to_excel(buf, index=False)
+
+        container_count = st.session_state.get("last_file_count", len(today_new))
+        buf = _build_new_sku_summary_excel(export_df)
         st.download_button(
             "下载当天新SKU总结表 (Excel)",
-            data=buf.getvalue(),
-            file_name=f"RongHui_New_SKUs_{date.today().isoformat()}.xlsx",
+            data=buf,
+            file_name=f"RongHui_New_SKUs_{date.today().isoformat()}_{container_count}containers.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
