@@ -44,6 +44,16 @@ section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] .stRadi
     color: #C7D2DD !important;
 }
 
+/* 侧边栏内按钮（如退出登录）背景浅色，文字需用深色才看得清 */
+section[data-testid="stSidebar"] button {
+    color: var(--text-primary) !important;
+}
+section[data-testid="stSidebar"] button p,
+section[data-testid="stSidebar"] button span,
+section[data-testid="stSidebar"] button div {
+    color: var(--text-primary) !important;
+}
+
 /* 主内容区背景 */
 .main .block-container {
     background-color: var(--surface);
@@ -132,11 +142,16 @@ def render_footer():
     )
 
 
-def render_page_header():
+def render_page_header(page_name: str):
     st.markdown(
-        """
-        <div style="color:#5B6B7C; font-size:0.85rem; margin-top:-0.6rem; margin-bottom:1.2rem;">
-            RongHui_SKU_HS_Check &nbsp;·&nbsp; Vevor EU — Internal Use Only
+        f"""
+        <div style="margin-bottom:1.6rem;">
+            <div style="font-size:2.1rem; font-weight:800; color:#1E3A5F; line-height:1.2;">
+                RongHui_SKU_HS_Check
+            </div>
+            <div style="font-size:0.95rem; color:#5B6B7C; margin-top:0.3rem;">
+                Vevor EU — Internal Use Only &nbsp;·&nbsp; {page_name}
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -181,8 +196,7 @@ def _reset_batch_state():
 
 
 def page_upload_compare():
-    st.header("上传与比对")
-    render_page_header()
+    render_page_header("上传与比对")
     upload_mode = st.radio("上传方式", ["ZIP批量上传", "单个/多个Excel文件"], horizontal=True)
 
     files_to_parse = []  # list of (filename, buffer)
@@ -392,8 +406,7 @@ def page_upload_compare():
 
 
 def page_database():
-    st.header("主数据库")
-    render_page_header()
+    render_page_header("主数据库")
     db_df = sheets_db.load_master_db()
     st.caption(f"共 {len(db_df)} 条SKU记录")
 
@@ -416,8 +429,7 @@ def page_database():
 
 
 def page_change_log():
-    st.header("变更日志")
-    render_page_header()
+    render_page_header("变更日志")
     log_df = sheets_db.load_change_log()
     st.caption(f"共 {len(log_df)} 条记录")
     action_filter = st.multiselect("筛选操作类型", options=sorted(log_df["action"].unique()) if len(log_df) else [])
