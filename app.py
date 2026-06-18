@@ -5,13 +5,13 @@ INTERNATIONAL GROUP）提供的 packing list，做 SKU 品名/HS 的一致性校
 """
 import io
 import zipfile
-from datetime import datetime, date
+from datetime import date
 
 import pandas as pd
 import streamlit as st
 
 from pl_parser import parse_packing_list
-from compare_engine import compare_batch, summarize
+from compare_engine import compare_batch, resolve_batch_conflicts, summarize
 import sheets_db
 
 st.set_page_config(page_title="RongHui_SKU_HS_Check", layout="wide")
@@ -47,6 +47,14 @@ def extract_excels_from_zip(zip_file) -> list[tuple[str, io.BytesIO]]:
     return out
 
 
+def _reset_batch_state():
+    for key in [
+        "last_result_df", "last_file_count", "pending_conflicts", "pending_new",
+        "new_skus_written", "today_new_skus", "batch_conflicts_resolved",
+    ]:
+        st.session_state.pop(key, None)
+
+
 def page_upload_compare():
     st.header("上传与比对")
     upload_mode = st.radio("上传方式", ["ZIP批量上传", "单个/多个Excel文件"], horizontal=True)
@@ -69,6 +77,7 @@ def page_upload_compare():
         return
 
     if st.button("开始解析与比对", type="primary"):
+        _reset_batch_state()
         all_records = []
         parse_errors = []
         progress = st.progress(0.0)
@@ -95,11 +104,65 @@ def page_upload_compare():
 
         st.session_state["last_result_df"] = result_df
         st.session_state["last_file_count"] = len(files_to_parse) - len(parse_errors)
-        st.session_state["pending_conflicts"] = result_df[result_df["status"] == "CONFLICT"].copy()
-        st.session_state["pending_new"] = result_df[result_df["status"] == "NEW"].copy()
+        st.session_state["last_db_df"] = db_df
 
     if "last_result_df" not in st.session_state:
         return
+
+    result_df = st.session_state["last_result_df"]
+
+    # ---------- 第一步：批次内部冲突必须先处理 ----------
+    batch_conflicts = result_df[result_df["status"] == "BATCH_CONFLICT"]
+    if len(batch_conflicts) > 0 and not st.session_state.get("batch_conflicts_resolved", False):
+        st.subheader(f"⚠️ 批次内部冲突（{len(batch_conflicts)} 个SKU）")
+        st.caption(
+            "以下SKU在本次上传的不同文件里，品名或HS不一致。请为每个SKU选择本次最终采用哪个版本"
+            "（默认已预选「出现文件数最多」的版本，可在下拉框里修改）。处理完才能继续后续比对。"
+        )
+
+        choice_rows = []
+        for _, row in batch_conflicts.iterrows():
+            variants = row["variants"]
+            # 默认预选出现次数最多的变体
+            default_idx = max(range(len(variants)), key=lambda i: len(variants[i]["files"]))
+            options = [
+                f"[{i+1}] {v['description']} | HS={v['hs_code']} | 来自{len(v['files'])}个文件: {', '.join(v['files'])}"
+                for i, v in enumerate(variants)
+            ]
+            choice_rows.append({
+                "SKU": row["sku"],
+                "选择采用哪个版本": options[default_idx],
+                "_options": options,
+                "_sku": row["sku"],
+            })
+
+        for i, item in enumerate(choice_rows):
+            choice_rows[i]["选择采用哪个版本"] = st.selectbox(
+                f"SKU: {item['SKU']}",
+                options=item["_options"],
+                index=item["_options"].index(item["选择采用哪个版本"]),
+                key=f"batch_conflict_{item['_sku']}",
+            )
+
+        if st.button("✅ 确认批次内部冲突的选择，继续比对", type="primary"):
+            resolutions = {}
+            for item in choice_rows:
+                chosen_label = item["选择采用哪个版本"]
+                chosen_idx = item["_options"].index(chosen_label)
+                resolutions[item["_sku"]] = chosen_idx
+
+            resolved_df = resolve_batch_conflicts(result_df, resolutions, st.session_state["last_db_df"])
+            st.session_state["last_result_df"] = resolved_df
+            st.session_state["batch_conflicts_resolved"] = True
+            st.session_state["pending_conflicts"] = resolved_df[resolved_df["status"] == "CONFLICT"].copy()
+            st.session_state["pending_new"] = resolved_df[resolved_df["status"] == "NEW"].copy()
+            st.rerun()
+        return  # 批次内部冲突没处理完，不展示后续报告
+
+    if len(batch_conflicts) == 0:
+        st.session_state.setdefault("pending_conflicts", result_df[result_df["status"] == "CONFLICT"].copy())
+        st.session_state.setdefault("pending_new", result_df[result_df["status"] == "NEW"].copy())
+        st.session_state.setdefault("batch_conflicts_resolved", True)
 
     result_df = st.session_state["last_result_df"]
     stats = summarize(result_df, st.session_state["last_file_count"])
@@ -114,7 +177,19 @@ def page_upload_compare():
 
     pending_new = st.session_state.get("pending_new", pd.DataFrame())
     if len(pending_new) > 0 and not st.session_state.get("new_skus_written", False):
-        st.info(f"本次发现 {len(pending_new)} 个新SKU，确认无误后点击下方按钮写入数据库")
+        st.info(f"本次发现 {len(pending_new)} 个新SKU，预览如下，确认无误后点击下方按钮写入数据库")
+        preview_search = st.text_input("搜索新SKU预览（按SKU或品名）", key="preview_search")
+        preview_df = pending_new[["sku", "new_description", "new_hs_code", "sources"]].rename(
+            columns={"new_description": "品名", "new_hs_code": "HS编码", "sku": "SKU", "sources": "来源文件"}
+        )
+        if preview_search:
+            mask = (
+                preview_df["SKU"].str.contains(preview_search, case=False, na=False)
+                | preview_df["品名"].str.contains(preview_search, case=False, na=False)
+            )
+            preview_df = preview_df[mask]
+        st.dataframe(preview_df, use_container_width=True, hide_index=True, height=350)
+
         if st.button("✅ 确认写入新SKU到数据库", type="primary"):
             new_rows = [
                 {
@@ -131,7 +206,7 @@ def page_upload_compare():
 
     pending_conflicts = st.session_state.get("pending_conflicts", pd.DataFrame())
     if len(pending_conflicts) > 0:
-        st.subheader(f"需人工确认的冲突（{len(pending_conflicts)} 个）")
+        st.subheader(f"需人工确认的数据库冲突（{len(pending_conflicts)} 个）")
         st.caption("勾选「更新为新记录」的SKU将用本次packing list的数据覆盖数据库；未勾选的默认保留数据库原记录")
 
         display_df = pending_conflicts.copy()
@@ -153,7 +228,7 @@ def page_upload_compare():
             key="conflict_editor",
         )
 
-        if st.button("提交冲突处理结果", type="primary"):
+        if st.button("提交数据库冲突处理结果", type="primary"):
             decisions = []
             for _, row in edited.iterrows():
                 orig = pending_conflicts[pending_conflicts["sku"] == row["sku"]].iloc[0]
@@ -170,8 +245,8 @@ def page_upload_compare():
             keep_count = len(decisions) - update_count
             st.success(f"已处理 {len(decisions)} 个冲突：{update_count} 个更新，{keep_count} 个保留原记录")
             st.session_state.pop("pending_conflicts", None)
-    elif "last_result_df" in st.session_state:
-        st.info("本次没有需要人工确认的冲突")
+    elif st.session_state.get("batch_conflicts_resolved", False):
+        st.info("本次没有需要人工确认的数据库冲突")
 
     today_new = st.session_state.get("today_new_skus")
     if today_new is not None and len(today_new) > 0:
