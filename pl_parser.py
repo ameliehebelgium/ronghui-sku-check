@@ -158,31 +158,47 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
     for r in range(header_row + 1, ws.max_row + 1):
         df_raw = ws.cell(r, desc_fallback_col).value
         is_new_group = df_raw is not None and str(df_raw).strip() != ""
-        if is_new_group:
-            # Item Description 列出现新值，代表进入新的产品分组，
-            # 清空上一组遗留的"建议品名/建议HS"值，避免串到不相关的产品上
-            last_desc_primary, last_desc_fallback = None, None
-            last_hs_primary, last_hs_fallback = None, None
 
         sku_val = ws.cell(r, sku_col).value
         dp = ws.cell(r, desc_primary_col).value if desc_primary_col else None
         hp = ws.cell(r, hs_primary_col).value if hs_primary_col else None
         hf = ws.cell(r, hs_fallback_col).value if hs_fallback_col else None
 
-        if dp is not None and str(dp).strip() != "":
-            last_desc_primary = dp
-        if df_raw is not None and str(df_raw).strip() != "":
-            last_desc_fallback = df_raw
-        if hp is not None and str(hp).strip() != "":
-            last_hs_primary = hp
-        if hf is not None and str(hf).strip() != "":
-            last_hs_fallback = hf
+        dp_str = str(dp).strip() if dp is not None else ""
+        df_str = str(df_raw).strip() if df_raw is not None else ""
+        hp_str = str(hp).strip() if hp is not None else ""
+        hf_str = str(hf).strip() if hf is not None else ""
+
+        if is_new_group:
+            # fallback 列出现新分组值：更新 fallback 缓存，并重置 primary 缓存。
+            # primary 缓存只在「与 fallback 同行出现」时才作为组级继承值；
+            # 这样子行里单独出现的 primary 值（如 Exhaust system）只服务当行，
+            # 后续空行会正确回退到 fallback（如 DIESEL HEATER PARTS），而不是
+            # 继续沿用子行的 primary。
+            last_desc_fallback = df_str
+            last_desc_primary = dp_str  # 同行 primary 有值就记录，没有就清空
+            last_hs_fallback = hf_str if hf_str else last_hs_fallback
+            last_hs_primary = hp_str  # 同上
+        else:
+            # 非新分组（子行）：fallback 正常累积；
+            # primary 不写入缓存——子行的 primary 只用于当行本身，
+            # 不影响后续空行的继承（后续空行应回退到 fallback）。
+            if df_str:
+                last_desc_fallback = df_str
+            if hf_str:
+                last_hs_fallback = hf_str
 
         if not _looks_like_sku(sku_val):
             continue
 
-        description = last_desc_primary if last_desc_primary not in (None, "") else last_desc_fallback
-        hs_code = last_hs_primary if last_hs_primary not in (None, "") else last_hs_fallback
+        # 当前行自己的 primary 优先；primary 为空时用组级 primary 缓存
+        # （仅在 fallback 同行写入的值，即 is_new_group 时记录的）；
+        # 都没有才回退到 fallback（Item Description 列的最近值）。
+        row_desc_primary = dp_str if dp_str else last_desc_primary
+        row_hs_primary = hp_str if hp_str else last_hs_primary
+
+        description = row_desc_primary if row_desc_primary else last_desc_fallback
+        hs_code = row_hs_primary if row_hs_primary else last_hs_fallback
 
         records.append({
             "sku": str(sku_val).strip(),
