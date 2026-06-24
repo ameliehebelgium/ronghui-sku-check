@@ -180,20 +180,25 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
             last_hs_fallback = hf_str if hf_str else last_hs_fallback
             last_hs_primary = hp_str  # 同上
         else:
-            # 非新分组（子行）：fallback 正常累积；
-            # primary 不写入缓存——子行的 primary 只用于当行本身，
-            # 不影响后续空行的继承（后续空行应回退到 fallback）。
+            # 非新分组（子行）：
+            # - desc_primary 不写缓存：子行的"建议品名"只属于当行，
+            #   后续空行应回退到 fallback（Item Description）而非沿用子行标注。
+            # - hs_primary 正常 forward-fill：子行的"建议HS"是实质性的 HS 码，
+            #   后续空行应继续沿用，而不是回退到更早的组级 HS。
             if df_str:
                 last_desc_fallback = df_str
             if hf_str:
                 last_hs_fallback = hf_str
+            if hp_str:
+                last_hs_primary = hp_str
 
         if not _looks_like_sku(sku_val):
             continue
 
-        # 当前行自己的 primary 优先；primary 为空时用组级 primary 缓存
-        # （仅在 fallback 同行写入的值，即 is_new_group 时记录的）；
-        # 都没有才回退到 fallback（Item Description 列的最近值）。
+        # 当前行自己的 primary 优先；
+        # desc_primary 为空时用组级缓存（is_new_group 时写入，子行不更新）；
+        # hs_primary 为空时用最近缓存（含子行 forward-fill）；
+        # 都没有才回退到 fallback。
         row_desc_primary = dp_str if dp_str else last_desc_primary
         row_hs_primary = hp_str if hp_str else last_hs_primary
 
