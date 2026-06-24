@@ -180,13 +180,14 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
             last_hs_fallback = hf_str if hf_str else last_hs_fallback
             last_hs_primary = hp_str  # 同上
         else:
-            # 非新分组（子行）：
-            # - desc_primary 不写缓存：子行的"建议品名"只属于当行，
-            #   后续空行应回退到 fallback（Item Description）而非沿用子行标注。
-            # - hs_primary 正常 forward-fill：子行的"建议HS"是实质性的 HS 码，
-            #   后续空行应继续沿用，而不是回退到更早的组级 HS。
+            # 非新分组（子行）：desc_primary 和 hs_primary 都做 forward-fill。
+            # Excel 合并格在 openpyxl 里表现为"只有第一格有值，后续格为 None"，
+            # None 即"继承上一格"，forward-fill 正好还原这个语义。
+            # 唯一重置时机：is_new_group（fallback 列出现新值，进入新产品组）。
             if df_str:
                 last_desc_fallback = df_str
+            if dp_str:
+                last_desc_primary = dp_str
             if hf_str:
                 last_hs_fallback = hf_str
             if hp_str:
@@ -195,15 +196,9 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
         if not _looks_like_sku(sku_val):
             continue
 
-        # 当前行自己的 primary 优先；
-        # desc_primary 为空时用组级缓存（is_new_group 时写入，子行不更新）；
-        # hs_primary 为空时用最近缓存（含子行 forward-fill）；
-        # 都没有才回退到 fallback。
-        row_desc_primary = dp_str if dp_str else last_desc_primary
-        row_hs_primary = hp_str if hp_str else last_hs_primary
-
-        description = row_desc_primary if row_desc_primary else last_desc_fallback
-        hs_code = row_hs_primary if row_hs_primary else last_hs_fallback
+        # primary 优先，都没有才回退到 fallback
+        description = last_desc_primary if last_desc_primary else last_desc_fallback
+        hs_code = last_hs_primary if last_hs_primary else last_hs_fallback
 
         records.append({
             "sku": str(sku_val).strip(),
