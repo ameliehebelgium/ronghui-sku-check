@@ -5,7 +5,7 @@
 BATCH_CONFLICT，需人工选择采用哪个文件的值。
 
 规则（已与用户确认）：
-- 品名比对：要求文字完全一致才算一致，不做模糊匹配
+- 品名比对：忽略大小写后完全一致即视为一致（case-insensitive）
 - HS比对：要求数值完全一致（字符串比较，已在解析阶段去除 .0 等后缀）
 - 数据库中不存在该SKU -> NEW（人工确认汇总报告后才写入，不自动写入）
 - 数据库中存在，品名和HS都完全一致 -> MATCH（自动忽略）
@@ -17,14 +17,20 @@ import pandas as pd
 
 
 def _variants_for_sku(group: pd.DataFrame) -> list[dict]:
-    """同一SKU在本批次内出现的所有不同(description, hs_code)组合及对应来源文件"""
-    seen = {}
+    """同一SKU在本批次内出现的所有不同(description, hs_code)组合及对应来源文件
+    品名比对忽略大小写；key 用 lower() 去重，展示值保留第一次出现的原始大小写。
+    """
+    seen = {}   # lower_key -> (original_desc, original_hs, files)
     for _, row in group.iterrows():
-        key = (str(row["description"]).strip(), str(row["hs_code"]).strip())
-        seen.setdefault(key, set()).add(row["source_file"])
+        desc = str(row["description"]).strip()
+        hs   = str(row["hs_code"]).strip()
+        key  = (desc.lower(), hs.lower())
+        if key not in seen:
+            seen[key] = (desc, hs, set())
+        seen[key][2].add(row["source_file"])
     return [
-        {"description": desc, "hs_code": hs, "files": sorted(files)}
-        for (desc, hs), files in seen.items()
+        {"description": orig_desc, "hs_code": orig_hs, "files": sorted(files)}
+        for (orig_desc, orig_hs, files) in seen.values()
     ]
 
 
@@ -78,7 +84,7 @@ def compare_batch(new_df: pd.DataFrame, db_df: pd.DataFrame) -> pd.DataFrame:
             db_desc, db_hs = "", ""
         else:
             db_desc, db_hs = db_rec["description"], db_rec["hs_code"]
-            if new_desc == db_desc and new_hs == db_hs:
+            if new_desc.lower() == db_desc.lower() and new_hs.lower() == db_hs.lower():
                 status = "MATCH"
             else:
                 status = "CONFLICT"
@@ -126,7 +132,7 @@ def resolve_batch_conflicts(result_df: pd.DataFrame, resolutions: dict, db_df: p
             db_desc, db_hs = "", ""
         else:
             db_desc, db_hs = db_rec["description"], db_rec["hs_code"]
-            status = "MATCH" if (new_desc == db_desc and new_hs == db_hs) else "CONFLICT"
+            status = "MATCH" if (new_desc.lower() == db_desc.lower() and new_hs.lower() == db_hs.lower()) else "CONFLICT"
 
         result_df.at[idx, "new_description"] = new_desc
         result_df.at[idx, "new_hs_code"] = new_hs
