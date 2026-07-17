@@ -20,6 +20,9 @@ RongHui Packing List 解析模块
    优先列按 None 处理，自动回退用兜底列。
    - "税率"（本次新增） = 建议HS 右边紧邻一列。只有在"建议HS"这一列存在时才去抓取，
      因为这一列本身就是跟着"建议HS"出现的，不单独设兜底列。
+     税率兜底列：如果这一行"建议HS"和这一列"税率"都是空的（说明分类的人认可了
+     原来的 HTS，没有改），改用"税金"左边紧邻那一列的税率（按SKU逐行填写，
+     不需要 forward-fill，因为这一列没有合并格)。
 3. 描述列/HS列/税率列都做 forward-fill（合并格/续行导致的空值，向上找最近非空值），
    三者共用同一套"是否进入新分组"的判断（以描述兜底列出现新值为准）。
 4. SKU 列没有固定位置/表头，用内容特征自动识别（每行几乎都非空、且为字母数字混合长字符串）。
@@ -34,6 +37,7 @@ import openpyxl
 
 DESC_FALLBACK_KEYWORDS = ["item description", "description"]
 HS_FALLBACK_KEYWORDS = ["hts", "hs code", "h.s.code", "h.s. code"]
+TAX_AMOUNT_KEYWORDS = ["税金"]
 NO_KEYWORDS = ["no.", "no", "序号"]
 # 已知的其它字段表头关键字，用来判断"右边紧邻列"是否其实是别的已知字段
 # （也就是说这次文件没有"建议品名/建议HS"这一列）
@@ -156,6 +160,17 @@ def _find_preferred_col(ws, header_row, anchor_col, sku_col_guess_exclude):
     return candidate
 
 
+def _find_tax_fallback_col(ws, header_row):
+    """
+    税率兜底列：定位"税金"这一列，它左边紧邻一列通常是配套的"税率"。
+    这一列是按每个SKU单独填写的（没有合并格），所以不需要 forward-fill。
+    """
+    tax_amount_col = _match_col(ws, header_row, TAX_AMOUNT_KEYWORDS)
+    if tax_amount_col is None or tax_amount_col <= 1:
+        return None
+    return tax_amount_col - 1
+
+
 def parse_packing_list(file_path_or_buffer, file_name=None):
     """
     解析单个 packing list 文件，返回 DataFrame:
@@ -182,8 +197,10 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
 
     # 税率列：紧跟在"建议HS"右边一列，只有"建议HS"这一列存在时才有意义
     tax_col = (hs_primary_col + 1) if hs_primary_col else None
+    # 税率兜底列：紧邻"税金"左边一列，用于"建议HS"和税率都没填时的兜底
+    tax_fallback_col = _find_tax_fallback_col(ws, header_row)
 
-    exclude = {c for c in [desc_primary_col, desc_fallback_col, hs_primary_col, hs_fallback_col, tax_col] if c}
+    exclude = {c for c in [desc_primary_col, desc_fallback_col, hs_primary_col, hs_fallback_col, tax_col, tax_fallback_col] if c}
     sku_col = _find_sku_col(ws, header_row, exclude)
     if sku_col is None:
         raise ValueError(f"找不到SKU列（{file_name}）：内容特征识别失败")
@@ -212,12 +229,14 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
         hp = ws.cell(r, hs_primary_col).value if hs_primary_col else None
         hf = ws.cell(r, hs_fallback_col).value if hs_fallback_col else None
         tx = ws.cell(r, tax_col).value if tax_col else None
+        tf = ws.cell(r, tax_fallback_col).value if tax_fallback_col else None
 
         dp_str = str(dp).strip() if dp is not None else ""
         df_str = str(df_raw).strip() if df_raw is not None else ""
         hp_str = str(hp).strip() if hp is not None else ""
         hf_str = str(hf).strip() if hf is not None else ""
         tx_str = str(tx).strip() if tx is not None else ""
+        tf_str = str(tf).strip() if tf is not None else ""
 
         if is_new_group:
             # fallback 列出现新分组值：更新 fallback 缓存，并重置 primary 缓存。
@@ -252,12 +271,15 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
         # primary 优先，都没有才回退到 fallback
         description = last_desc_primary if last_desc_primary else last_desc_fallback
         hs_code = last_hs_primary if last_hs_primary else last_hs_fallback
+        # 税率：优先用"建议HS"旁边那一列；如果这行没有（说明认可了原HTS，没改），
+        # 改用"税金"旁边那一列（按当前这一行的SKU直接取值，不跟着 forward-fill）
+        tax_raw = last_tax if last_tax else tf_str
 
         records.append({
             "sku": str(sku_val).strip(),
             "description": str(description).strip() if description is not None else "",
             "hs_code": _normalize_hs(hs_code),
-            "tax_rate": _normalize_tax_rate(last_tax),
+            "tax_rate": _normalize_tax_rate(tax_raw),
             "po_number": str(po_number).strip() if po_number else "",
             "source_file": file_name or "",
         })
