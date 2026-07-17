@@ -43,13 +43,31 @@ def _get_spreadsheet():
 
 
 def _get_or_create_worksheet(sheet_name, columns):
+    """
+    获取（或新建）一个 worksheet。如果表已存在但缺少 columns 里的某些列
+    （比如旧表还没有 tax_rate 这一列），自动把缺的表头追加到表头行末尾，
+    不改变已有列的顺序和数据——只是把新列"补"上去，历史行在新列上就是空值。
+    """
     ss = _get_spreadsheet()
     try:
         ws = ss.worksheet(sheet_name)
     except gspread.WorksheetNotFound:
         ws = ss.add_worksheet(title=sheet_name, rows=1000, cols=len(columns) + 2)
         ws.append_row(columns)
+        return ws
+
+    existing_header = ws.row_values(1)
+    missing = [c for c in columns if c not in existing_header]
+    if missing:
+        start_col = len(existing_header) + 1
+        for i, col_name in enumerate(missing):
+            ws.update_cell(1, start_col + i, col_name)
     return ws
+
+
+def _current_header(ws, fallback_columns):
+    header = ws.row_values(1)
+    return header if header else list(fallback_columns)
 
 
 def load_master_db() -> pd.DataFrame:
@@ -73,12 +91,20 @@ def append_new_skus(new_rows: list[dict], operator: str = "system"):
     if not new_rows:
         return
     ws = _get_or_create_worksheet(MASTER_SHEET_NAME, MASTER_COLUMNS)
+    header = _current_header(ws, MASTER_COLUMNS)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows_to_append = []
     for r in new_rows:
-        rows_to_append.append([
-            r["sku"], r["description"], r["hs_code"], r.get("tax_rate", ""), now, now, r.get("sources", "")
-        ])
+        values_by_col = {
+            "sku": r["sku"],
+            "description": r["description"],
+            "hs_code": r["hs_code"],
+            "tax_rate": r.get("tax_rate", ""),
+            "first_entry_time": now,
+            "last_update_time": now,
+            "sources": r.get("sources", ""),
+        }
+        rows_to_append.append([values_by_col.get(col, "") for col in header])
     ws.append_rows(rows_to_append)
     _append_log_rows([
         {
@@ -134,7 +160,8 @@ def apply_conflict_decisions(decisions: list[dict], operator: str = "user"):
 
 def _append_log_rows(rows: list[dict]):
     ws = _get_or_create_worksheet(LOG_SHEET_NAME, LOG_COLUMNS)
-    ws.append_rows([[r.get(c, "") for c in LOG_COLUMNS] for r in rows])
+    header = _current_header(ws, LOG_COLUMNS)
+    ws.append_rows([[r.get(c, "") for c in header] for r in rows])
 
 
 def load_change_log() -> pd.DataFrame:
