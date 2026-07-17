@@ -2,8 +2,14 @@
 RongHui Packing List 解析模块
 
 解析逻辑：
-0. 文件可能包含多个分单（发票/箱单/合同等），固定读取名称中包含"箱单"的那个
-   sheet，不再默认取第一个 sheet。
+0. 文件可能包含多个分单（发票/箱单/合同等），也可能只有一个叫"Sheet1"的分单，
+   按下面优先级选择要解析的那个分单：
+   a) 分单名称里带"箱单"两个字 -> 直接用它
+   b) 没有的话，找哪个分单的内容里有"Packing List"这个标记（通常在表格最上方
+      的大标题） -> 用它，不依赖分单叫什么名字
+   c) 都没有，但工作簿里只有一个分单 -> 直接用这一个（常见于本来就只导出了
+      箱单这一张表，随手叫 Sheet1 的情况）
+   d) 以上都不满足才报错，提示这份文件实际有哪些分单，方便人工确认
 1. 先定位两个一定带文字的"锚点列"：
    - "Item Description" 列（描述兜底列）
    - "HTS" 列（HS兜底列）
@@ -39,13 +45,34 @@ SKU_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9\-]{6,}$")
 
 
 def _select_sheet(wb, file_name=None):
-    """文件可能含多个分单（发票/箱单/合同...），固定选择名称里带"箱单"的那个"""
+    """
+    分单选择优先级：
+    a) 名称里带"箱单" -> 直接用
+    b) 内容左上角区域有"Packing List"标记的分单 -> 用它（不依赖分单叫什么名字）
+    c) 工作簿只有一个分单 -> 直接用这一个
+    d) 都不满足 -> 报错，报出实际有哪些分单
+    """
     matches = [name for name in wb.sheetnames if "箱单" in name]
-    if not matches:
-        raise ValueError(
-            f"找不到'箱单'分单（{file_name}）：工作簿里的分单是 {wb.sheetnames}"
-        )
-    return wb[matches[0]]
+    if matches:
+        return wb[matches[0]]
+
+    for name in wb.sheetnames:
+        ws = wb[name]
+        max_r = min(10, ws.max_row)
+        max_c = min(10, ws.max_column)
+        for r in range(1, max_r + 1):
+            for c in range(1, max_c + 1):
+                v = ws.cell(r, c).value
+                if isinstance(v, str) and "packing list" in v.strip().lower():
+                    return wb[name]
+
+    if len(wb.sheetnames) == 1:
+        return wb[wb.sheetnames[0]]
+
+    raise ValueError(
+        f"找不到'箱单'分单（{file_name}）：工作簿里的分单是 {wb.sheetnames}，"
+        f"也没有找到带'Packing List'标记的分单"
+    )
 
 
 def _find_header_row(ws, max_scan_rows=40):
