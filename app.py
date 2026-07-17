@@ -213,15 +213,26 @@ def _reset_batch_state():
         st.session_state.pop(key, None)
 
 
-def _build_new_sku_summary_excel(export_df: pd.DataFrame) -> bytes:
-    """生成当天新SKU总结表，自动设置足够宽的列宽，避免内容被截断"""
+def _autosize_columns(ws, headers, export_df, min_width=12, max_width=80):
+    """按每列实际内容最大长度自动设置列宽（留一点余量，并设置上限避免单列过宽）"""
+    from openpyxl.utils import get_column_letter
+
+    for col_idx, header in enumerate(headers, start=1):
+        max_len = len(str(header))
+        for value in export_df[header]:
+            max_len = max(max_len, len(str(value)))
+        width = min(max_len + 4, max_width)
+        ws.column_dimensions[get_column_letter(col_idx)].width = max(width, min_width)
+
+
+def _build_simple_excel(export_df: pd.DataFrame, sheet_title: str) -> bytes:
+    """通用Excel导出：表头加粗 + 按内容自动设置列宽，避免打开后内容被截断/看不全"""
     from openpyxl import Workbook
     from openpyxl.styles import Font
-    from openpyxl.utils import get_column_letter
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "新SKU总结表"
+    ws.title = sheet_title
 
     headers = list(export_df.columns)
     ws.append(headers)
@@ -231,17 +242,16 @@ def _build_new_sku_summary_excel(export_df: pd.DataFrame) -> bytes:
     for _, row in export_df.iterrows():
         ws.append([row[h] for h in headers])
 
-    # 按每列实际内容最大长度自动设置列宽（留一点余量，并设置上限避免单列过宽）
-    for col_idx, header in enumerate(headers, start=1):
-        max_len = len(str(header))
-        for value in export_df[header]:
-            max_len = max(max_len, len(str(value)))
-        width = min(max_len + 4, 80)
-        ws.column_dimensions[get_column_letter(col_idx)].width = max(width, 12)
+    _autosize_columns(ws, headers, export_df)
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _build_new_sku_summary_excel(export_df: pd.DataFrame) -> bytes:
+    """生成当天新SKU总结表，自动设置足够宽的列宽，避免内容被截断"""
+    return _build_simple_excel(export_df, "新SKU总结表")
 
 
 def _build_batch_conflict_report(batch_conflicts: pd.DataFrame) -> bytes:
@@ -254,7 +264,7 @@ def _build_batch_conflict_report(batch_conflicts: pd.DataFrame) -> bytes:
     ws = wb.active
     ws.title = "批次内部冲突"
 
-    headers = ["序号", "冲突SKU", "版本", "品名", "HS编码", "出现次数(文件数)", "来源文件"]
+    headers = ["序号", "冲突SKU", "版本", "品名", "HS编码", "税率", "出现次数(文件数)", "来源文件"]
     ws.append(headers)
     for c in range(1, len(headers) + 1):
         cell = ws.cell(1, c)
@@ -270,7 +280,7 @@ def _build_batch_conflict_report(batch_conflicts: pd.DataFrame) -> bytes:
         first_row_of_sku = row_idx
         for v_i, v in enumerate(variants):
             ws.append([
-                n + 1, sku, v_i + 1, v["description"], v["hs_code"],
+                n + 1, sku, v_i + 1, v["description"], v["hs_code"], v.get("tax_rate", ""),
                 len(v["files"]), ", ".join(v["files"]),
             ])
             for c in range(1, len(headers) + 1):
@@ -280,7 +290,7 @@ def _build_batch_conflict_report(batch_conflicts: pd.DataFrame) -> bytes:
         for c in range(1, len(headers) + 1):
             ws.cell(first_row_of_sku, c).border = thick_top
 
-    widths = [6, 26, 6, 32, 14, 16, 60]
+    widths = [6, 26, 6, 32, 14, 10, 16, 60]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -369,7 +379,8 @@ def page_upload_compare():
             variants = row["variants"]
             default_idx = max(range(len(variants)), key=lambda i: len(variants[i]["files"]))
             options = [
-                f"[{i+1}] {v['description']} | HS={v['hs_code']} | 来自{len(v['files'])}个文件: {', '.join(v['files'])}"
+                f"[{i+1}] {v['description']} | HS={v['hs_code']} | 税率={v.get('tax_rate', '') or '（空）'} "
+                f"| 来自{len(v['files'])}个文件: {', '.join(v['files'])}"
                 for i, v in enumerate(variants)
             ]
             choice_rows.append({
@@ -458,8 +469,8 @@ def page_upload_compare():
     if len(pending_new) > 0 and not st.session_state.get("new_skus_written", False):
         st.info(f"本次发现 {len(pending_new)} 个新SKU，预览如下，确认无误后点击下方按钮写入数据库")
         preview_search = st.text_input("搜索新SKU预览（按SKU或品名）", key="preview_search")
-        preview_df = pending_new[["sku", "new_description", "new_hs_code", "sources"]].rename(
-            columns={"new_description": "品名", "new_hs_code": "HS编码", "sku": "SKU", "sources": "来源文件"}
+        preview_df = pending_new[["sku", "new_description", "new_hs_code", "new_tax_rate", "sources"]].rename(
+            columns={"new_description": "品名", "new_hs_code": "HS编码", "new_tax_rate": "税率", "sku": "SKU", "sources": "来源文件"}
         )
         if preview_search:
             mask = (
@@ -473,7 +484,8 @@ def page_upload_compare():
             new_rows = [
                 {
                     "sku": r["sku"], "description": r["new_description"],
-                    "hs_code": r["new_hs_code"], "sources": r["sources"],
+                    "hs_code": r["new_hs_code"], "tax_rate": r["new_tax_rate"],
+                    "sources": r["sources"],
                 }
                 for _, r in pending_new.iterrows()
             ]
@@ -491,21 +503,30 @@ def page_upload_compare():
         display_df = pending_conflicts.copy()
         display_df.insert(0, "更新为新记录", False)
         edited = st.data_editor(
-            display_df[["更新为新记录", "sku", "db_description", "db_hs_code", "new_description", "new_hs_code", "sources"]],
+            display_df[[
+                "更新为新记录", "sku", "db_description", "db_hs_code", "db_tax_rate",
+                "new_description", "new_hs_code", "new_tax_rate", "sources",
+            ]],
             column_config={
                 "更新为新记录": st.column_config.CheckboxColumn(),
                 "sku": "SKU",
                 "db_description": "数据库原品名",
                 "db_hs_code": "数据库原HS",
+                "db_tax_rate": "数据库原税率",
                 "new_description": "本次品名",
                 "new_hs_code": "本次HS",
+                "new_tax_rate": "本次税率",
                 "sources": "来源文件",
             },
-            disabled=["sku", "db_description", "db_hs_code", "new_description", "new_hs_code", "sources"],
+            disabled=[
+                "sku", "db_description", "db_hs_code", "db_tax_rate",
+                "new_description", "new_hs_code", "new_tax_rate", "sources",
+            ],
             hide_index=True,
             use_container_width=True,
             key="conflict_editor",
         )
+        st.caption("说明：是否需要更新只看品名/HS是否一致，税率仅作展示；勾选「更新为新记录」时税率也会一并覆盖为本次的值。")
 
         if st.button("提交数据库冲突处理结果", type="primary"):
             decisions = []
@@ -516,8 +537,10 @@ def page_upload_compare():
                     "action": "UPDATE" if row["更新为新记录"] else "KEEP",
                     "old_description": orig["db_description"],
                     "old_hs_code": orig["db_hs_code"],
+                    "old_tax_rate": orig["db_tax_rate"],
                     "new_description": orig["new_description"],
                     "new_hs_code": orig["new_hs_code"],
+                    "new_tax_rate": orig["new_tax_rate"],
                 })
             sheets_db.apply_conflict_decisions(decisions)
             update_count = sum(1 for d in decisions if d["action"] == "UPDATE")
@@ -530,8 +553,8 @@ def page_upload_compare():
     today_new = st.session_state.get("today_new_skus")
     if today_new is not None and len(today_new) > 0:
         st.subheader("当天新SKU总结表")
-        export_df = today_new[["sku", "new_description", "new_hs_code", "sources"]].rename(
-            columns={"new_description": "description", "new_hs_code": "hs_code"}
+        export_df = today_new[["sku", "new_description", "new_hs_code", "new_tax_rate", "sources"]].rename(
+            columns={"new_description": "description", "new_hs_code": "hs_code", "new_tax_rate": "tax_rate"}
         )
         st.dataframe(export_df, use_container_width=True, hide_index=True)
 
@@ -558,11 +581,10 @@ def page_database():
 
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    buf = io.BytesIO()
-    db_df.to_excel(buf, index=False)
+    buf = _build_simple_excel(db_df, "主数据库")
     st.download_button(
         "一键下载主数据库 (Excel)",
-        data=buf.getvalue(),
+        data=buf,
         file_name=f"RongHui_SKU_Master_{date.today().isoformat()}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )

@@ -23,8 +23,11 @@ SCOPES = [
 MASTER_SHEET_NAME = "RongHui_SKU_Master"
 LOG_SHEET_NAME = "RongHui_Change_Log"
 
-MASTER_COLUMNS = ["sku", "description", "hs_code", "first_entry_time", "last_update_time", "sources"]
-LOG_COLUMNS = ["timestamp", "sku", "old_description", "old_hs_code", "new_description", "new_hs_code", "action", "operator"]
+MASTER_COLUMNS = ["sku", "description", "hs_code", "tax_rate", "first_entry_time", "last_update_time", "sources"]
+LOG_COLUMNS = [
+    "timestamp", "sku", "old_description", "old_hs_code", "old_tax_rate",
+    "new_description", "new_hs_code", "new_tax_rate", "action", "operator",
+]
 
 
 @st.cache_resource
@@ -61,11 +64,12 @@ def load_master_db() -> pd.DataFrame:
     df["sku"] = df["sku"].astype(str).str.strip()
     df["description"] = df["description"].astype(str).str.strip()
     df["hs_code"] = df["hs_code"].astype(str).str.strip()
+    df["tax_rate"] = df["tax_rate"].astype(str).str.strip()
     return df
 
 
 def append_new_skus(new_rows: list[dict], operator: str = "system"):
-    """new_rows: [{sku, description, hs_code, sources}, ...]"""
+    """new_rows: [{sku, description, hs_code, tax_rate, sources}, ...]"""
     if not new_rows:
         return
     ws = _get_or_create_worksheet(MASTER_SHEET_NAME, MASTER_COLUMNS)
@@ -73,13 +77,13 @@ def append_new_skus(new_rows: list[dict], operator: str = "system"):
     rows_to_append = []
     for r in new_rows:
         rows_to_append.append([
-            r["sku"], r["description"], r["hs_code"], now, now, r.get("sources", "")
+            r["sku"], r["description"], r["hs_code"], r.get("tax_rate", ""), now, now, r.get("sources", "")
         ])
     ws.append_rows(rows_to_append)
     _append_log_rows([
         {
-            "timestamp": now, "sku": r["sku"], "old_description": "", "old_hs_code": "",
-            "new_description": r["description"], "new_hs_code": r["hs_code"],
+            "timestamp": now, "sku": r["sku"], "old_description": "", "old_hs_code": "", "old_tax_rate": "",
+            "new_description": r["description"], "new_hs_code": r["hs_code"], "new_tax_rate": r.get("tax_rate", ""),
             "action": "NEW_ENTRY", "operator": operator,
         }
         for r in new_rows
@@ -88,8 +92,8 @@ def append_new_skus(new_rows: list[dict], operator: str = "system"):
 
 def apply_conflict_decisions(decisions: list[dict], operator: str = "user"):
     """
-    decisions: [{sku, action: 'KEEP'|'UPDATE', old_description, old_hs_code,
-                 new_description, new_hs_code}, ...]
+    decisions: [{sku, action: 'KEEP'|'UPDATE', old_description, old_hs_code, old_tax_rate,
+                 new_description, new_hs_code, new_tax_rate}, ...]
     action == 'UPDATE' 时才真正写回数据库，'KEEP' 只记录日志不改数据。
     """
     if not decisions:
@@ -100,6 +104,7 @@ def apply_conflict_decisions(decisions: list[dict], operator: str = "user"):
     sku_col_idx = header.index("sku") if "sku" in header else 0
     desc_col_idx = header.index("description") if "description" in header else 1
     hs_col_idx = header.index("hs_code") if "hs_code" in header else 2
+    tax_col_idx = header.index("tax_rate") if "tax_rate" in header else None
     update_col_idx = header.index("last_update_time") if "last_update_time" in header else 4
 
     sku_to_row = {row[sku_col_idx].strip(): idx + 2 for idx, row in enumerate(all_values[1:])}
@@ -111,13 +116,17 @@ def apply_conflict_decisions(decisions: list[dict], operator: str = "user"):
         log_rows.append({
             "timestamp": now, "sku": sku,
             "old_description": d["old_description"], "old_hs_code": d["old_hs_code"],
+            "old_tax_rate": d.get("old_tax_rate", ""),
             "new_description": d["new_description"], "new_hs_code": d["new_hs_code"],
+            "new_tax_rate": d.get("new_tax_rate", ""),
             "action": d["action"], "operator": operator,
         })
         if d["action"] == "UPDATE" and sku in sku_to_row:
             row_idx = sku_to_row[sku]
             ws.update_cell(row_idx, desc_col_idx + 1, d["new_description"])
             ws.update_cell(row_idx, hs_col_idx + 1, d["new_hs_code"])
+            if tax_col_idx is not None:
+                ws.update_cell(row_idx, tax_col_idx + 1, d.get("new_tax_rate", ""))
             ws.update_cell(row_idx, update_col_idx + 1, now)
 
     _append_log_rows(log_rows)

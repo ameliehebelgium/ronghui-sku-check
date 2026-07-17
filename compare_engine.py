@@ -19,32 +19,36 @@ import pandas as pd
 def _variants_for_sku(group: pd.DataFrame) -> list[dict]:
     """同一SKU在本批次内出现的所有不同(description, hs_code)组合及对应来源文件
     品名比对忽略大小写；key 用 lower() 去重，展示值保留第一次出现的原始大小写。
+    税率不参与一致性判断（只跟着品名/HS这个组合展示），取该组合第一次出现时的税率值。
     """
-    seen = {}   # lower_key -> (original_desc, original_hs, files)
+    seen = {}   # lower_key -> (original_desc, original_hs, tax_rate, files)
     for _, row in group.iterrows():
         desc = str(row["description"]).strip()
         hs   = str(row["hs_code"]).strip()
+        tax  = str(row.get("tax_rate", "")).strip()
         key  = (desc.lower(), hs.lower())
         if key not in seen:
-            seen[key] = (desc, hs, set())
-        seen[key][2].add(row["source_file"])
+            seen[key] = (desc, hs, tax, set())
+        seen[key][3].add(row["source_file"])
     return [
-        {"description": orig_desc, "hs_code": orig_hs, "files": sorted(files)}
-        for (orig_desc, orig_hs, files) in seen.values()
+        {"description": orig_desc, "hs_code": orig_hs, "tax_rate": tax_rate, "files": sorted(files)}
+        for (orig_desc, orig_hs, tax_rate, files) in seen.values()
     ]
 
 
 def compare_batch(new_df: pd.DataFrame, db_df: pd.DataFrame) -> pd.DataFrame:
     """
-    new_df: 本次批量解析结果，列 [sku, description, hs_code, po_number, source_file]
+    new_df: 本次批量解析结果，列 [sku, description, hs_code, tax_rate, po_number, source_file]
             可能包含同一SKU出现在多个文件里的情况（同一批次内部重复）
-    db_df:  数据库现有记录，列至少包含 [sku, description, hs_code]
+    db_df:  数据库现有记录，列至少包含 [sku, description, hs_code]（tax_rate 可选，兼容旧数据）
 
     返回 DataFrame，每个唯一SKU一行，新增列：
         status: NEW / MATCH / CONFLICT / BATCH_CONFLICT
-        db_description, db_hs_code: 数据库里原有的值（NEW/BATCH_CONFLICT时可能为空）
+        db_description, db_hs_code, db_tax_rate: 数据库里原有的值（NEW/BATCH_CONFLICT时可能为空）
         sources: 本批次中出现该SKU的所有来源文件名（逗号分隔）
-        variants: 仅 BATCH_CONFLICT 时有效，本批次内出现的所有不同(品名,HS)组合
+        variants: 仅 BATCH_CONFLICT 时有效，本批次内出现的所有不同(品名,HS,税率)组合
+
+    注意：税率不参与 NEW/MATCH/CONFLICT 的判定，只作为随品名/HS展示的附加信息。
     """
     db_lookup = {}
     if db_df is not None and len(db_df) > 0:
@@ -52,6 +56,7 @@ def compare_batch(new_df: pd.DataFrame, db_df: pd.DataFrame) -> pd.DataFrame:
             db_lookup[str(row["sku"]).strip()] = {
                 "description": str(row.get("description", "")).strip(),
                 "hs_code": str(row.get("hs_code", "")).strip(),
+                "tax_rate": str(row.get("tax_rate", "")).strip(),
             }
 
     rows = []
@@ -66,8 +71,10 @@ def compare_batch(new_df: pd.DataFrame, db_df: pd.DataFrame) -> pd.DataFrame:
                 "sku": sku,
                 "new_description": variants[0]["description"],
                 "new_hs_code": variants[0]["hs_code"],
+                "new_tax_rate": variants[0]["tax_rate"],
                 "db_description": "",
                 "db_hs_code": "",
+                "db_tax_rate": "",
                 "status": "BATCH_CONFLICT",
                 "po_numbers": po_numbers,
                 "sources": sources,
@@ -77,13 +84,15 @@ def compare_batch(new_df: pd.DataFrame, db_df: pd.DataFrame) -> pd.DataFrame:
 
         new_desc = variants[0]["description"]
         new_hs = variants[0]["hs_code"]
+        new_tax = variants[0]["tax_rate"]
         db_rec = db_lookup.get(sku)
 
         if db_rec is None:
             status = "NEW"
-            db_desc, db_hs = "", ""
+            db_desc, db_hs, db_tax = "", "", ""
         else:
             db_desc, db_hs = db_rec["description"], db_rec["hs_code"]
+            db_tax = db_rec.get("tax_rate", "")
             if new_desc.lower() == db_desc.lower() and new_hs.lower() == db_hs.lower():
                 status = "MATCH"
             else:
@@ -93,8 +102,10 @@ def compare_batch(new_df: pd.DataFrame, db_df: pd.DataFrame) -> pd.DataFrame:
             "sku": sku,
             "new_description": new_desc,
             "new_hs_code": new_hs,
+            "new_tax_rate": new_tax,
             "db_description": db_desc,
             "db_hs_code": db_hs,
+            "db_tax_rate": db_tax,
             "status": status,
             "po_numbers": po_numbers,
             "sources": sources,
@@ -115,6 +126,7 @@ def resolve_batch_conflicts(result_df: pd.DataFrame, resolutions: dict, db_df: p
             db_lookup[str(row["sku"]).strip()] = {
                 "description": str(row.get("description", "")).strip(),
                 "hs_code": str(row.get("hs_code", "")).strip(),
+                "tax_rate": str(row.get("tax_rate", "")).strip(),
             }
 
     result_df = result_df.copy()
@@ -125,19 +137,23 @@ def resolve_batch_conflicts(result_df: pd.DataFrame, resolutions: dict, db_df: p
         chosen_idx = resolutions.get(sku, 0)
         chosen = row["variants"][chosen_idx]
         new_desc, new_hs = chosen["description"], chosen["hs_code"]
+        new_tax = chosen.get("tax_rate", "")
 
         db_rec = db_lookup.get(sku)
         if db_rec is None:
             status = "NEW"
-            db_desc, db_hs = "", ""
+            db_desc, db_hs, db_tax = "", "", ""
         else:
             db_desc, db_hs = db_rec["description"], db_rec["hs_code"]
+            db_tax = db_rec.get("tax_rate", "")
             status = "MATCH" if (new_desc.lower() == db_desc.lower() and new_hs.lower() == db_hs.lower()) else "CONFLICT"
 
         result_df.at[idx, "new_description"] = new_desc
         result_df.at[idx, "new_hs_code"] = new_hs
+        result_df.at[idx, "new_tax_rate"] = new_tax
         result_df.at[idx, "db_description"] = db_desc
         result_df.at[idx, "db_hs_code"] = db_hs
+        result_df.at[idx, "db_tax_rate"] = db_tax
         result_df.at[idx, "status"] = status
 
     return result_df
