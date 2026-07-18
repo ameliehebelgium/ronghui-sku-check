@@ -465,6 +465,18 @@ def page_upload_compare():
     c4.metric("新SKU", stats["new_count"])
     c5.metric("需确认冲突", stats["conflict_count"])
 
+    summary_export_df = result_df[["sku", "new_description", "new_hs_code", "new_tax_rate", "status", "sources"]].rename(
+        columns={"new_description": "description", "new_hs_code": "hs_code", "new_tax_rate": "tax_rate"}
+    )
+    summary_buf = _build_simple_excel(summary_export_df, "本次核查总结")
+    st.download_button(
+        "下载本次核查总结单 (Excel)",
+        data=summary_buf,
+        file_name=f"RongHui_Check_Summary_{date.today().isoformat()}_{stats['file_count']}containers.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_check_summary",
+    )
+
     pending_new = st.session_state.get("pending_new", pd.DataFrame())
     if len(pending_new) > 0 and not st.session_state.get("new_skus_written", False):
         st.info(f"本次发现 {len(pending_new)} 个新SKU，预览如下，确认无误后点击下方按钮写入数据库")
