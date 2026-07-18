@@ -18,11 +18,13 @@ RongHui Packing List 解析模块
    - "建议HS"   = HTS 右边紧邻一列（前提：该列不是下一个已知字段列，比如 Qty/税率，且不是 SKU 列）
    如果该位置紧邻的就是另一个已知字段（比如直接是 Qty / 税率），说明这次文件没有"建议"列，
    优先列按 None 处理，自动回退用兜底列。
-   - "税率"（本次新增） = 建议HS 右边紧邻一列。只有在"建议HS"这一列存在时才去抓取，
-     因为这一列本身就是跟着"建议HS"出现的，不单独设兜底列。
-     税率兜底列：如果这一行"建议HS"和这一列"税率"都是空的（说明分类的人认可了
-     原来的 HTS，没有改），改用"税金"左边紧邻那一列的税率（按SKU逐行填写，
-     不需要 forward-fill，因为这一列没有合并格)。
+   - "税率"（本次新增） = 建议HS 右边紧邻一列，但要校验那一列的表头不是
+     Qty/CTNS/G.W./N.W. 这些已知字段——如果是，说明这份文件在这个位置根本没有
+     "税率"这一列，不能把 Qty 之类的数值误当成税率，直接整行走税率兜底列。
+     税率兜底列：紧邻"税金"左边一列的税率，在"建议HS"和税率主列都取不到值时使用。
+     这一列有时候只填了同一产品分组里第一个SKU，后面同组的SKU留空，这种情况
+     按分组续填（跟品名/HS列一样的 forward-fill 处理，同一产品分组内没填的
+     默认跟前面已填的税率一致，遇到新的产品分组再重新判断）。
 3. 描述列/HS列/税率列都做 forward-fill（合并格/续行导致的空值，向上找最近非空值），
    三者共用同一套"是否进入新分组"的判断（以描述兜底列出现新值为准）。
 4. SKU 列没有固定位置/表头，用内容特征自动识别（每行几乎都非空、且为字母数字混合长字符串）。
@@ -44,6 +46,11 @@ NO_KEYWORDS = ["no.", "no", "序号"]
 KNOWN_OTHER_FIELD_KEYWORDS = [
     "qty", "ctns", "g.w.", "n.w.", "税率", "hts", "hs code",
 ]
+# 专门用来校验"税率主列"的关键字：不含"税率"本身（那正是我们想认可的字段），
+# 只用来排除 Qty/CTNS/G.W./N.W. 这些明显不是税率的已知字段。
+# 有的批次在"建议HS"右边直接跳到 Qty，没有税率这一列，这时候要能识别出来，
+# 不能把 Qty 的数值误当成税率去用。
+TAX_BLOCKING_KEYWORDS = ["qty", "ctns", "g.w.", "n.w.", "hts", "hs code"]
 
 SKU_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9\-]{6,}$")
 
@@ -160,10 +167,29 @@ def _find_preferred_col(ws, header_row, anchor_col, sku_col_guess_exclude):
     return candidate
 
 
+def _find_tax_primary_col(ws, header_row, hs_primary_col):
+    """
+    税率主列：紧跟在"建议HS"右边一列。
+    前提：那一列的表头不是 Qty/CTNS/G.W./N.W. 这些已知字段——如果是，说明这份
+    文件在这个位置根本没有"税率"这一列（比如直接是 Qty），那就整行都靠
+    税率兜底列（税金旁边那列）去补，不能把 Qty 之类的数值误当成税率。
+    这一列本身表头有没有写"税率"两个字不强求（部分批次没有表头文字），
+    只要不是别的已知字段就当作税率列去读。
+    """
+    if hs_primary_col is None:
+        return None
+    candidate = hs_primary_col + 1
+    txt = _header_text(ws, header_row, candidate)
+    if txt is not None and any(kw in txt for kw in TAX_BLOCKING_KEYWORDS):
+        return None
+    return candidate
+
+
 def _find_tax_fallback_col(ws, header_row):
     """
     税率兜底列：定位"税金"这一列，它左边紧邻一列通常是配套的"税率"。
-    这一列是按每个SKU单独填写的（没有合并格），所以不需要 forward-fill。
+    这一列不一定每行都填，同一产品分组内有时候只填第一个SKU，其余留空——
+    调用处会按分组做 forward-fill 处理，这里只负责定位列。
     """
     tax_amount_col = _match_col(ws, header_row, TAX_AMOUNT_KEYWORDS)
     if tax_amount_col is None or tax_amount_col <= 1:
@@ -195,8 +221,8 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
     desc_primary_col = _find_preferred_col(ws, header_row, desc_fallback_col, set())
     hs_primary_col = _find_preferred_col(ws, header_row, hs_fallback_col, set())
 
-    # 税率列：紧跟在"建议HS"右边一列，只有"建议HS"这一列存在时才有意义
-    tax_col = (hs_primary_col + 1) if hs_primary_col else None
+    # 税率列：紧跟在"建议HS"右边一列，但要校验那一列不是Qty等别的已知字段
+    tax_col = _find_tax_primary_col(ws, header_row, hs_primary_col)
     # 税率兜底列：紧邻"税金"左边一列，用于"建议HS"和税率都没填时的兜底
     tax_fallback_col = _find_tax_fallback_col(ws, header_row)
 
@@ -219,6 +245,7 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
     last_desc_primary, last_desc_fallback = None, None
     last_hs_primary, last_hs_fallback = None, None
     last_tax = None
+    last_tax_fallback = None
 
     for r in range(header_row + 1, ws.max_row + 1):
         df_raw = ws.cell(r, desc_fallback_col).value
@@ -249,6 +276,7 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
             last_hs_fallback = hf_str if hf_str else last_hs_fallback
             last_hs_primary = hp_str  # 同上
             last_tax = tx_str  # 税率跟 hs_primary 同一套规则：同行有值就记录，没有就清空
+            last_tax_fallback = tf_str  # 兜底税率同理：同一产品分组内，只填了第一行的话后面要跟着抄
         else:
             # 非新分组（子行）：desc_primary / hs_primary / 税率都做 forward-fill。
             # Excel 合并格在 openpyxl 里表现为"只有第一格有值，后续格为 None"，
@@ -264,6 +292,8 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
                 last_hs_primary = hp_str
             if tx_str:
                 last_tax = tx_str
+            if tf_str:
+                last_tax_fallback = tf_str
 
         if not _looks_like_sku(sku_val):
             continue
@@ -272,8 +302,9 @@ def parse_packing_list(file_path_or_buffer, file_name=None):
         description = last_desc_primary if last_desc_primary else last_desc_fallback
         hs_code = last_hs_primary if last_hs_primary else last_hs_fallback
         # 税率：优先用"建议HS"旁边那一列；如果这行没有（说明认可了原HTS，没改），
-        # 改用"税金"旁边那一列（按当前这一行的SKU直接取值，不跟着 forward-fill）
-        tax_raw = last_tax if last_tax else tf_str
+        # 改用"税金"旁边那一列——这一列有时候只填了同一产品分组里第一个SKU，
+        # 后面同组的SKU留空，此时按分组续填（跟品名/HS一样的处理）
+        tax_raw = last_tax if last_tax else last_tax_fallback
 
         records.append({
             "sku": str(sku_val).strip(),
